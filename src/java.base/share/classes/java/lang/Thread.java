@@ -34,6 +34,7 @@ import java.util.Objects;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.StructureViolationException;
 import java.util.concurrent.locks.LockSupport;
+import java.util.concurrent.Executor;
 import jdk.internal.foreign.ConfinedSegmentPool;
 import jdk.internal.event.ThreadSleepEvent;
 import jdk.internal.misc.TerminatingThreadLocal;
@@ -616,6 +617,27 @@ public class Thread implements Runnable {
         }
         long nanos = MILLISECONDS.toNanos(millis);
         sleepNanos(nanos);
+    }
+
+    /**
+     * Switch executor for current VirtualThread to a targetExecutor
+     *
+     * @param  targetExecutor
+     *         the target scheduler to continue virtual thread on
+     *
+     * @throws  IllegalStateException
+     *          if called outside of virtual thread scope
+     *
+     * @return previously used Executor
+     **/
+    public static Executor whenVirtualContinueOn(Executor targetExecutor) throws IllegalStateException {
+        Objects.requireNonNull(targetExecutor);
+        if (Thread.currentThread() instanceof VirtualThread vthread) {
+            return vthread.migrateTo(targetExecutor);
+        } else {
+            throw new IllegalStateException(
+                    "called outside of virtual threads");
+        }
     }
 
     /**

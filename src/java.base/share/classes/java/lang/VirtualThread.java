@@ -26,7 +26,9 @@ package java.lang;
 
 import java.util.Locale;
 import java.util.Objects;
+import java.util.concurrent.Callable;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.ForkJoinPool.ForkJoinWorkerThreadFactory;
@@ -70,7 +72,7 @@ final class VirtualThread extends BaseVirtualThread {
     private static final long ON_WAITING_LIST = U.objectFieldOffset(VirtualThread.class, "onWaitingList");
 
     // scheduler and continuation
-    private final Executor scheduler;
+    private volatile Executor scheduler;
     private final Continuation cont;
     private final Runnable runContinuation;
 
@@ -405,7 +407,9 @@ final class VirtualThread extends BaseVirtualThread {
      * @see ForkJoinPool#lazySubmit(ForkJoinTask)
      */
     private void lazySubmitRunContinuation() {
-        if (currentThread() instanceof CarrierThread ct && ct.getQueuedTaskCount() == 0) {
+        if (currentThread() instanceof CarrierThread ct
+                && ct.getPool() == scheduler
+                && ct.getQueuedTaskCount() == 0) {
             ForkJoinPool pool = ct.getPool();
             try {
                 pool.lazySubmit(ForkJoinTask.adapt(runContinuation));
@@ -428,7 +432,9 @@ final class VirtualThread extends BaseVirtualThread {
      * @throws OutOfMemoryError
      */
     private void externalSubmitRunContinuationOrThrow() {
-        if (scheduler == DEFAULT_SCHEDULER && currentCarrierThread() instanceof CarrierThread ct) {
+        if (scheduler == DEFAULT_SCHEDULER
+                && currentCarrierThread() instanceof CarrierThread ct
+                && ct.getPool() == scheduler) {
             try {
                 ct.getPool().externalSubmit(ForkJoinTask.adapt(runContinuation));
             } catch (RejectedExecutionException ree) {
@@ -592,7 +598,9 @@ final class VirtualThread extends BaseVirtualThread {
             setState(YIELDED);
 
             // external submit if there are no tasks in the local task queue
-            if (currentThread() instanceof CarrierThread ct && ct.getQueuedTaskCount() == 0) {
+            if (currentThread() instanceof CarrierThread ct
+                    && ct.getPool() == scheduler
+                    && ct.getQueuedTaskCount() == 0) {
                 externalSubmitRunContinuation(ct.getPool());
             } else {
                 submitRunContinuation();
@@ -1353,6 +1361,66 @@ final class VirtualThread extends BaseVirtualThread {
         boolean asyncMode = true; // FIFO
         return new ForkJoinPool(parallelism, factory, handler, asyncMode,
                      0, maxPoolSize, minRunnable, pool -> true, 30, SECONDS);
+    }
+
+    /**
+     * Executes the task using the given executor in this virtual thread,
+     * then attempts to restore the previous scheduler.
+     */
+    <T> T runWithContext(ExecutorService executor, Callable<T> task) throws Exception {
+        Objects.requireNonNull(executor);
+        Objects.requireNonNull(task);
+
+        if (Thread.currentThread() != this) {
+            throw new IllegalStateException(
+                    "Execution scope must be entered by the virtual thread itself");
+        }
+
+        Executor previousScheduler = scheduler;
+        migrateTo(executor);
+
+        try {
+            // A direct call on the same virtual thread, after migration.
+            return task.call();
+        } finally {
+            migrateTo(previousScheduler);
+        }
+    }
+
+    /**
+     * Changes the scheduler and yields this virtual thread. If yielding fails,
+     * restores the previous scheduler and throws.
+     */
+    Executor migrateTo(Executor targetScheduler) {
+        assert Thread.currentThread() == this;
+        assert state() == RUNNING;
+
+        Executor previousScheduler = scheduler;
+        if (previousScheduler == targetScheduler) {
+            return previousScheduler;
+        }
+
+        boolean yielded = false;
+        scheduler = targetScheduler;
+        setState(YIELDING);
+
+        try {
+            // afterYield() submits the continuation to the target scheduler.
+            yielded = yieldContinuation();
+        } finally {
+            if (!yielded) {
+                scheduler = previousScheduler;
+                setState(RUNNING);
+            }
+        }
+
+        if (!yielded) {
+            throw new IllegalStateException(
+                    "Cannot migrate virtual thread to another scheduler");
+        }
+
+        assert state() == RUNNING;
+        return previousScheduler;
     }
 
     /**

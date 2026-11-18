@@ -41,7 +41,9 @@ import java.security.PrivilegedAction;
 import java.security.PrivilegedExceptionAction;
 import java.util.Collection;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
+import jdk.internal.misc.CarrierThread;
 import jdk.internal.ref.CleanerFactory;
 
 /**
@@ -263,6 +265,29 @@ public final class Executors {
     public static ExecutorService newVirtualThreadPerTaskExecutor() {
         ThreadFactory factory = Thread.ofVirtual().factory();
         return newThreadPerTaskExecutor(factory);
+    }
+
+    /**
+     * Creates a scheduler with the same configuration and lifecycle requirements
+     * using parallelism and the given name prefix
+     * for its carrier threads. Each carrier is named {@code name + "-" + threadId}.
+     *
+     * @param parallelism the parallelism level and maximum number of carrier threads
+     * @param name the carrier-thread name prefix
+     * @return the newly created scheduler
+     * @throws NullPointerException if name is null
+     * @throws IllegalArgumentException if {@code parallelism <= 0} or exceeds
+     *         the implementation limit of {@code ForkJoinPool}
+     */
+    public static ExecutorService newSchedulerForVirtualThread(int parallelism, String name) {
+        Objects.requireNonNull(name);
+        ForkJoinPool.ForkJoinWorkerThreadFactory factory = pool -> {
+            CarrierThread thread = new CarrierThread(pool);
+            thread.setName(name + "-" + thread.threadId());
+            return thread;
+        };
+        return new ForkJoinPool(parallelism, factory, null, true,
+                0, parallelism, 1, pool -> true, 30, TimeUnit.SECONDS);
     }
 
     /**
